@@ -157,10 +157,6 @@ struct dns_packet {
             uint8_t rdata[0]; // custom data
         };
 #pragma pack(pop)
-
-        resource_end &end() {
-            //return
-        }
     };
 
     header h;
