@@ -1,6 +1,8 @@
-// #include <router_relay/router.h>
 #include <boost/asio.hpp>
+#include <primitives/sw/main.h>
+
 #include <iostream>
+#include <print>
 #include <ranges>
 #include <variant>
 
@@ -156,8 +158,6 @@ struct dns_packet {
         };
 #pragma pack(pop)
 
-        uint16_t name; // varlen
-
         resource_end &end() {
             //return
         }
@@ -245,7 +245,8 @@ struct dns_packet {
                 a r;
                 r.ttl = res.ttl;
                 r.name = std::move(name);
-                r.address = *(decltype(r.address)*)p; // swap bytes?
+                r.address = *(decltype(r.address)*)p;
+                p += res.rdlength;
                 results.push_back(r);
                 break;
             }
@@ -269,58 +270,82 @@ struct dns_packet {
     }
 };
 
-struct dns_server {
-    std::vector<std::string> dns_servers;
+struct dns_resolver {
+    struct server {
+        std::string ip;
+        uint16_t port{53};
+    };
+    std::vector<server> dns_servers;
 
-    auto query(const std::string &domain) {
+    dns_resolver() = default;
+    dns_resolver(std::initializer_list<const char *> list) {
+        for (auto &&l : list) {
+            dns_servers.emplace_back(l);
+        }
+    }
+
+    auto query(const std::string &domain, uint16_t type = dns_packet::qtype::A, uint16_t class_ = dns_packet::qclass::INTERNET) {
+        return query(dns_servers.at(0), domain, type, class_);
+    }
+    auto query(auto &server, const std::string &domain, uint16_t type = dns_packet::qtype::A, uint16_t class_ = dns_packet::qclass::INTERNET) {
         // asio transport for now
+        std::vector<dns_packet::record_type> results;
         boost::asio::io_context ctx;
-        boost::asio::co_spawn(ctx, query_udp("gql.twitch.tv"s), boost::asio::detached);
+        boost::asio::co_spawn(ctx, query_udp(results, server, domain, type, class_), [](auto eptr) {
+            if (eptr) {
+                std::rethrow_exception(eptr);
+            }
+        });
         ctx.run();
+        return results;
+    }
+    // return ips?
+    auto resolve(const std::string &domain) {
+        for (auto &&s : dns_servers) {
+            for (auto &&r : query(s, domain)) {
+                if (auto p = std::get_if<dns_packet::a>(&r)) {
+                    return p->address;
+                }
+            }
+        }
+        throw std::runtime_error{"server not found: " + domain};
+    }
+
+private:
+    task<> query_udp(auto &results, auto &server, const std::string &domain, uint16_t type, uint16_t class_) {
+        auto ex = co_await boost::asio::this_coro::executor;
+        ip::udp::endpoint e(ip::address_v4::from_string(server.ip), server.port);
+        ip::udp::socket s(ex);
+        s.open(ip::udp::v4());
+        constexpr auto udp_packet_max_size = 512;
+        uint8_t buffer[udp_packet_max_size]{};
+        auto &p = *(dns_packet *)buffer;
+        //p.h.id = 123;
+        p.h.rd = 1; // some queries will fail without this
+        p.set_question(domain, type, class_);
+        co_await s.async_send_to(boost::asio::buffer(buffer, p.size()), e, boost::asio::use_awaitable);
+        co_await s.async_receive_from(boost::asio::buffer(buffer), e, boost::asio::use_awaitable);
+        if (p.h.rcode || p.h.z || p.h.qr == 0) {
+            throw std::runtime_error{"bad response"};
+        }
+        results = p.answers();
     }
 };
 
-task<> query_udp(std::string domain) {
-    auto ex = co_await boost::asio::this_coro::executor;
-    ip::udp::endpoint e(ip::address_v4::from_string("8.8.8.8"), 53);
-    ip::udp::socket s(ex);
-    s.open(ip::udp::v4());
-    constexpr auto udp_packet_max_size = 512;
-    uint8_t buffer[udp_packet_max_size]{};
-    auto &p = *(dns_packet*)buffer;
-    p.h.id = 123;
-    p.h.rd = 1;
-    p.set_question(domain, dns_packet::qtype::A, dns_packet::qclass::INTERNET);
-    co_await s.async_send_to(boost::asio::buffer(buffer, p.size()), e, boost::asio::use_awaitable);
-    co_await s.async_receive_from(boost::asio::buffer(buffer), e, boost::asio::use_awaitable);
-    auto answ = p.answers();
-    if (p.h.ra && p.h.rd) {
-        co_await s.async_send_to(boost::asio::buffer(&buffer, sizeof(buffer)), e, boost::asio::use_awaitable);
-        co_await s.async_receive_from(boost::asio::buffer(&buffer, sizeof(buffer)), e, boost::asio::use_awaitable);
-
-        int a = 5;
-        a++;
-    }
-
-    //auto &p2 = *(dns_packet *)&buffer;
-    //std::cout << p.h.id << "\n";
-    //printf("%d\n", p.h.id);
-    //std::cout << p2.h.id << "\n";
-    int a = 5;
-    a++;
-}
-
 int main(int argc, char *argv[]) {
-    dns_server serv{{"8.8.8.8"}};
-    serv.query("gql.twitch.tv"s);
+    dns_resolver serv{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.1.1.1"};
+    auto res = serv.query("gql.twitch.tv"s);
+    auto res_and_print = [&](auto &&what) {
+        auto res = serv.resolve(what);
+        char buf[20]{};
+        inet_ntop(AF_INET, &res, buf, sizeof(buf));
+        std::println("{} -> {}", what, buf);
+    };
+    res_and_print("twitch.tv"s);
+    res_and_print("www.youtube.com"s);
+    res_and_print("google.com"s);
+    res_and_print("egorpugin.ru"s);
+    res_and_print("aspia.egorpugin.ru"s);
 
-    //boost::asio::io_context ctx;
-    //boost::asio::co_spawn(ctx, query_udp("com."s), boost::asio::detached);
-    //boost::asio::co_spawn(ctx, query_udp("www.youtube.com"s), boost::asio::detached);
-    //boost::asio::co_spawn(ctx, query_udp("google.com"s), boost::asio::detached);
-    //boost::asio::co_spawn(ctx, query_udp("egorpugin.ru"s), boost::asio::detached);
-    //boost::asio::co_spawn(ctx, query_udp("aspia.egorpugin.ru"s), boost::asio::detached);
-    //boost::asio::co_spawn(ctx, query_udp("gql.twitch.tv"s), boost::asio::detached);
-    //ctx.run();
     return 0;
 }
