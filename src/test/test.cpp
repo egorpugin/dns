@@ -296,7 +296,7 @@ struct dns_resolver {
         return results;
     }
     // return ips?
-    auto resolve(const std::string &domain) {
+    auto resolve(const std::string &domain, uint16_t type = dns_packet::qtype::A, uint16_t class_ = dns_packet::qclass::INTERNET) {
         for (auto &&s : dns_servers) {
             for (auto &&r : query(s, domain)) {
                 if (auto p = std::get_if<dns_packet::a>(&r)) {
@@ -329,10 +329,10 @@ private:
 };
 
 int main(int argc, char *argv[]) {
-    dns_resolver serv{"1.1.1.1", "8.8.8.8", "8.8.4.4", "1.1.1.1"};
+    dns_resolver serv{"8.8.8.8", "8.8.4.4", "1.1.1.1"};
     auto res = serv.query("gql.twitch.tv"s);
-    auto res_and_print = [&](auto &&what) {
-        auto res = serv.resolve(what);
+    auto res_and_print = [&](auto &&what, uint16_t type = dns_packet::qtype::A) {
+        auto res = serv.resolve(what, type);
         char buf[20]{};
         inet_ntop(AF_INET, &res, buf, sizeof(buf));
         std::println("{} -> {}", what, buf);
@@ -340,6 +340,7 @@ int main(int argc, char *argv[]) {
     res_and_print("twitch.tv"s);
     res_and_print("www.youtube.com"s);
     res_and_print("google.com"s);
+    res_and_print("google.com"s, dns_packet::qtype::MX);
     res_and_print("egorpugin.ru"s);
     res_and_print("aspia.egorpugin.ru"s);
 
